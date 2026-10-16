@@ -1,0 +1,70 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths-ignore:
+      - 'dist/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.12'
+      - name: Run integration tests
+        run: python -m unittest discover -s tests -v
+
+  build:
+    needs: test
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.12'
+      - name: Install build tools
+        run: python -m pip install -r requirements-build.txt
+      - name: Build bundled EXE
+        run: python scripts/build_windows.py
+      - name: Test the actual executable
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath "$PWD\dist\Remote222.exe" -ArgumentList "--self-test --report `"$PWD\dist\windows-selftest.json`"" -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path dist/windows-selftest.json) { Get-Content dist/windows-selftest.json }
+            throw "EXE self-test failed: $($process.ExitCode)"
+          }
+          $report = Get-Content dist/windows-selftest.json -Raw | ConvertFrom-Json
+          if (-not $report.ok) { throw 'EXE self-test report did not pass' }
+          Get-Content dist/windows-selftest.json
+      - name: Save Windows download
+        uses: actions/upload-artifact@v4
+        with:
+          name: Remote222-Windows-x64
+          path: |
+            dist/Remote222.exe
+            dist/Remote222.exe.sha256
+            dist/windows-selftest.json
+          if-no-files-found: error
+      - name: Publish versioned download
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create $env:RELEASE_TAG dist/Remote222.exe dist/Remote222.exe.sha256 dist/windows-selftest.json --verify-tag --title "Remote222 $env:RELEASE_TAG — Windows EXE" --notes-file packaging/release-notes.md
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }

@@ -4,6 +4,11 @@
   isolated; do not create a Git worktree unless the user asks for one.
 - This is a Python 3.12+ standard-library project. No dependency installation is
   needed for `python3 -m remote222.client` or the test suite.
+- Windows users normally run the single-file Remote222.exe from GitHub Releases.
+  The visible Tk app manages the agent and bundled cloudflared, validates readiness,
+  and stops the tunnel when closed. Build on Windows via scripts/build_windows.py
+  and requirements-build.txt, or .github/workflows/windows-exe.yml. Never substitute
+  a Linux binary for the Windows EXE or bypass the pinned cloudflared checksum.
 - Run `python3 -m unittest discover -s tests -v` after relevant changes. Linux tests
   do not establish that Windows desktop operations work; use the documented
   Windows smoke check when the user's Windows agent is available.

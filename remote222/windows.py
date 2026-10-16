@@ -147,7 +147,8 @@ try {
     $stream.Dispose(); $graphics.Dispose(); $bitmap.Dispose()
 }
 '''.replace("MAX_WIDTH", str(max_width))
-    result = subprocess.run(powershell(script), capture_output=True, timeout=30)
+    result = subprocess.run(powershell(script), capture_output=True, timeout=30,
+                            creationflags=subprocess.CREATE_NO_WINDOW)
     if result.returncode:
         raise ActionError(result.stderr.decode("utf-8", errors="replace")[-2000:])
     import json

@@ -1,0 +1,2 @@
+# Windows build tools only; the application needs no installed Python packages.
+pyinstaller==6.16.0

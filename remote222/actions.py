@@ -48,7 +48,7 @@ def run_shell(args):
     timeout = int_arg(args, "timeout", 30, 1, 300)
     cwd = text_arg(args, "cwd", default=str(Path.home()))
     argv = powershell(command) if os.name == "nt" else ["/bin/bash", "-lc", command]
-    options = {} if os.name == "nt" else {"start_new_session": True}
+    options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL,
                                 stdout=stdout, stderr=stderr, **options)
@@ -59,7 +59,8 @@ def run_shell(args):
             timed_out = True
             if os.name == "nt":
                 subprocess.run(["taskkill.exe", "/PID", str(proc.pid), "/T", "/F"],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
             else:
                 os.killpg(proc.pid, signal.SIGKILL)
             proc.kill()

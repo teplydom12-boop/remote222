@@ -10,3 +10,5 @@ dist/*
 .remote222/
 *.token
 *.log
+vendor/
+*.spec
