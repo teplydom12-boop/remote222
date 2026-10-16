@@ -1,6 +1,7 @@
 """Loopback-only authenticated agent, intended to sit behind an HTTPS tunnel."""
 
 import argparse
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -55,8 +56,14 @@ class Store:
         with self.connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS commands (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, response TEXT, created TEXT NOT NULL)")
 
+    @contextmanager
     def connect(self):
-        return sqlite3.connect(self.path, timeout=10)
+        connection = sqlite3.connect(self.path, timeout=10)
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def lookup(self, request_id):
         with self.connect() as db:

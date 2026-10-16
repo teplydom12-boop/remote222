@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -51,6 +52,12 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("shell", result["result"]["capabilities"])
         with self.assertRaisesRegex(ClientError, "HTTP 401"):
             Client(self.url, "wrong-key").info()
+
+    def test_database_connection_is_closed_after_transaction(self):
+        with self.server.store.connect() as connection:
+            self.assertEqual(connection.execute("SELECT 1").fetchone(), (1,))
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")
 
     def test_unauthorized_action_has_no_side_effect(self):
         path = Path(self.temp.name) / "unauthorized.txt"
