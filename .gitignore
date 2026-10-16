@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/*
+!dist/remote222-windows.zip
+!dist/remote222-windows.zip.sha256
+.pytest_cache/
+.remote222/
+*.token
+*.log
