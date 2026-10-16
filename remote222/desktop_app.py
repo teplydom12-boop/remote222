@@ -1,4 +1,4 @@
-"""Visible Windows app: one button starts the agent and its bundled tunnel."""
+"""Visible Windows app with a polling queue or bundled direct tunnel."""
 
 import os
 import queue
@@ -7,7 +7,8 @@ from tkinter import messagebox, ttk
 
 from . import __version__
 from .agent import default_state_dir
-from .session import Session
+from .client import ClientError
+from .session import RelaySession, Session
 
 
 class DesktopApp:
@@ -18,10 +19,14 @@ class DesktopApp:
         self.closing = False
         self.copied_key = None
         self.url = tk.StringVar()
+        self.mode = tk.StringVar(value="relay")
+        self.relay_url = tk.StringVar()
+        self.worker_key = tk.StringVar()
+        self.connection_hint = tk.StringVar()
         self.status = tk.StringVar(value="Управление отключено")
         root.title(f"Remote222 {__version__}")
-        root.geometry("680x465")
-        root.minsize(600, 440)
+        root.geometry("740x690")
+        root.minsize(700, 650)
         root.protocol("WM_DELETE_WINDOW", self.close)
         style = ttk.Style(root)
         if "vista" in style.theme_names():
@@ -31,6 +36,23 @@ class DesktopApp:
         body.pack(fill="both", expand=True)
         ttk.Label(body, text="Управление вашим компьютером", font=("Segoe UI", 17, "bold")).pack(anchor="w")
         ttk.Label(body, text="Windows · программы · файлы · клавиатура и мышь", padding=(0, 7)).pack(anchor="w")
+        choice = ttk.Frame(body)
+        choice.pack(fill="x", pady=5)
+        self.mode_buttons = [
+            ttk.Radiobutton(choice, text="Через сервер очереди", value="relay", variable=self.mode, command=self.update_mode),
+            ttk.Radiobutton(choice, text="Прямой туннель Cloudflare", value="direct", variable=self.mode, command=self.update_mode),
+        ]
+        for button in self.mode_buttons:
+            button.pack(side="left", padx=(0, 15))
+        self.relay_settings = ttk.Frame(body)
+        self.relay_settings.pack(fill="x", pady=5)
+        ttk.Label(self.relay_settings, text="HTTPS-адрес вашего сервера очереди").pack(anchor="w")
+        self.relay_url_entry = ttk.Entry(self.relay_settings, textvariable=self.relay_url)
+        self.relay_url_entry.pack(fill="x", pady=(3, 7))
+        ttk.Label(self.relay_settings, text="Ключ компьютера (REMOTE222_WORKER_TOKEN на сервере)").pack(anchor="w")
+        self.worker_key_entry = ttk.Entry(self.relay_settings, textvariable=self.worker_key, show="•")
+        self.worker_key_entry.pack(fill="x", pady=3)
+        ttk.Label(self.relay_settings, text="Ключ хранится только в памяти этого окна. Сервер настраивается один раз.", wraplength=650).pack(anchor="w")
         self.state_label = ttk.Label(body, textvariable=self.status, font=("Segoe UI", 11, "bold"), foreground="#5e6672", padding=(0, 14))
         self.state_label.pack(anchor="w")
         controls = ttk.Frame(body)
@@ -47,25 +69,47 @@ class DesktopApp:
         self.copy_url_button.pack(side="left")
         self.copy_key_button = ttk.Button(copy, text="Скопировать ключ", command=self.copy_key, state="disabled")
         self.copy_key_button.pack(side="left", padx=10)
-        ttk.Label(body, text="Отправьте адрес в чат. Ключ вставьте в секрет REMOTE222_TOKEN\nв настройках облачной среды; в чат ключ отправлять не нужно.", justify="left").pack(anchor="w")
+        ttk.Label(body, textvariable=self.connection_hint, justify="left", wraplength=650).pack(anchor="w")
         ttk.Separator(body).pack(fill="x", pady=15)
         ttk.Label(body, text="При включении доступны действия с правами вашей учётной записи.\nЗакрытие этого окна отключает управление. Автозапуска нет.", justify="left").pack(anchor="w")
         ttk.Button(body, text="Открыть папку журналов", command=self.open_logs).pack(anchor="w", pady=(12, 0))
+        self.update_mode()
         self.root.after(100, self.poll)
+
+    def update_mode(self):
+        relay = self.mode.get() == "relay"
+        for entry in (self.relay_url_entry, self.worker_key_entry):
+            entry.configure(state="normal" if relay and not self.session else "disabled")
+        for button in self.mode_buttons:
+            button.configure(state="disabled" if self.session else "normal")
+        self.connection_hint.set(
+            "Отправьте адрес сервера в чат. Ключ управления REMOTE222_CONTROLLER_TOKEN из настроек сервера вставьте в секрет REMOTE222_TOKEN облачной среды. Ключи в чат не отправляйте."
+            if relay else
+            "Отправьте адрес в чат. Кнопка «Скопировать ключ» копирует ключ прямого подключения: вставьте его в секрет REMOTE222_TOKEN облачной среды.")
 
     def start(self):
         if self.session:
+            return
+        emit = lambda kind, data: self.events.put((kind, data))
+        try:
+            if self.mode.get() == "relay":
+                self.session = RelaySession(default_state_dir(), emit,
+                                            self.relay_url.get().strip(), self.worker_key.get().strip())
+            else:
+                self.session = Session(default_state_dir(), emit)
+        except (ClientError, ValueError, RuntimeError) as exc:
+            messagebox.showerror("Проверьте настройки", str(exc), parent=self.root)
             return
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
         self.status.set("Запуск…")
         self.state_label.configure(foreground="#5e6672")
-        self.session = Session(default_state_dir(), lambda kind, data: self.events.put((kind, data)))
+        self.update_mode()
         self.session.start()
 
     def stop(self):
         if self.session:
-            self.status.set("Отключение…")
+            self.status.set("Отключение; начатая команда может завершаться…")
             self.stop_button.configure(state="disabled")
             self.copy_url_button.configure(state="disabled")
             self.copy_key_button.configure(state="disabled")
@@ -78,7 +122,7 @@ class DesktopApp:
             self.root.clipboard_append(self.url.get())
 
     def copy_key(self):
-        if self.session and self.session.token:
+        if self.mode.get() == "direct" and self.session and self.session.token:
             self.root.clipboard_clear()
             self.root.clipboard_append(self.session.token)
             self.copied_key = self.session.token
@@ -119,7 +163,7 @@ class DesktopApp:
                     self.status.set("Управление включено")
                     self.state_label.configure(foreground="#187448")
                     self.copy_url_button.configure(state="normal")
-                    self.copy_key_button.configure(state="normal")
+                    self.copy_key_button.configure(state="normal" if self.mode.get() == "direct" else "disabled")
                 elif kind == "error" and not self.closing:
                     self.state_label.configure(foreground="#a32626")
                     messagebox.showerror("Не удалось подключиться", data, parent=self.root)
@@ -129,6 +173,7 @@ class DesktopApp:
                     self.status.set("Управление отключено")
                     self.state_label.configure(foreground="#5e6672")
                     self.start_button.configure(state="normal")
+                    self.update_mode()
                     for button in (self.stop_button, self.copy_url_button, self.copy_key_button):
                         button.configure(state="disabled")
                     if self.closing:

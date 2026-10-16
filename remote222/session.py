@@ -191,3 +191,62 @@ class Session:
                 log_writer.close()
             lock.close()
             self.emit("stopped", None)
+
+
+class RelaySession(Session):
+    """Visible interactive agent with outbound polling of an authorized broker."""
+
+    def __init__(self, state_dir, emit, relay_url, worker_token):
+        super().__init__(state_dir, emit)
+        from .client import normalize_url
+        self.relay_url = normalize_url(relay_url)
+        if not worker_token or any(char in worker_token for char in "\r\n"):
+            raise ValueError("Укажите ключ компьютера из настроек сервера очереди.")
+        self.worker_token = worker_token
+        self.worker = None
+
+    def _run(self):
+        from .relay import RelayWorker
+        lock = StateLock(self.state_dir / "agent.lock")
+        server_thread = None
+        try:
+            self.emit("status", "Подготовка подключения к очереди…")
+            protect_state(self.state_dir)
+            lock.acquire()
+            self.token = prepare_state(self.state_dir)
+            if self.stop_event.is_set():
+                return
+            self.server = AgentServer(0, self.state_dir, self.token)
+            server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+            server_thread.start()
+            local = Client(f"http://127.0.0.1:{self.server.server_port}", self.token)
+            info = local.info()
+            if not info.get("ok") or info.get("result", {}).get("pid") != os.getpid():
+                raise RuntimeError("Локальный агент не прошёл проверку запуска.")
+
+            def worker_event(kind, data):
+                if kind == "ready" and not self.stop_event.is_set():
+                    self.url = self.relay_url
+                    self.emit("ready", self.relay_url)
+                elif kind == "status" and not self.stop_event.is_set():
+                    self.emit("status", data["message"] if isinstance(data, dict) else data)
+                elif kind == "error" and not self.stop_event.is_set():
+                    self.emit("error", data)
+
+            self.worker = RelayWorker(self.relay_url, self.worker_token, local,
+                                      self.stop_event, emit=worker_event)
+            self.worker.run()
+        except Exception as exc:
+            if not self.stop_event.is_set():
+                self.emit("error", str(exc))
+        finally:
+            self.url = None
+            self.worker_token = None
+            if self.server:
+                if server_thread:
+                    self.server.shutdown()
+                self.server.server_close()
+            if server_thread:
+                server_thread.join(timeout=5)
+            lock.close()
+            self.emit("stopped", None)

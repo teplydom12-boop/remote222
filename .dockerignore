@@ -1,0 +1,13 @@
+# Build the broker from source only; credentials and local artifacts stay out.
+*
+!Dockerfile
+!.dockerignore
+!remote222/
+!remote222/**
+remote222/**/__pycache__/
+remote222/**/*.pyc
+remote222/**/*.pyo
+remote222/**/*.sqlite*
+remote222/**/*.db*
+remote222/**/*.token
+remote222/**/.env*

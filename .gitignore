@@ -9,6 +9,9 @@ dist/*
 .pytest_cache/
 .remote222/
 *.token
+*.sqlite3*
+.env
+.env.*
 *.log
 vendor/
 *.spec

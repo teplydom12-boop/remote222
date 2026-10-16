@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "remote222"
-version = "0.2.0"
-description = "Explicitly started Windows desktop agent and HTTPS control client"
+version = "0.3.0"
+description = "Visible Windows desktop agent with direct or queued HTTPS control"
 requires-python = ">=3.12"
 dependencies = []
 
@@ -13,6 +13,7 @@ dependencies = []
 remote222 = "remote222.client:main"
 remote222-agent = "remote222.agent:main"
 remote222-desktop = "remote222.desktop_app:main"
+remote222-broker = "remote222.broker:main"
 
 [tool.setuptools.packages.find]
 include = ["remote222*"]

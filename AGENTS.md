@@ -5,8 +5,13 @@
 - This is a Python 3.12+ standard-library project. No dependency installation is
   needed for `python3 -m remote222.client` or the test suite.
 - Windows users normally run the single-file Remote222.exe from GitHub Releases.
-  The visible Tk app manages the agent and bundled cloudflared, validates readiness,
-  and stops the tunnel when closed. Build on Windows via scripts/build_windows.py
+  The visible Tk app offers a polling queue (default) and a direct Cloudflare
+  tunnel. Queue mode requires the user's own explicitly allowed HTTPS broker.
+  Use REMOTE222_TOKEN for the controller credential and `--transport relay`.
+  The worker key is entered locally in Windows; the agent token stays local.
+  A broker heartbeat does not replace a fresh queued info response from Windows.
+  Closing the app stops new jobs but an already running command can still finish.
+  Build on Windows via scripts/build_windows.py
   and requirements-build.txt, or .github/workflows/windows-exe.yml. Never substitute
   a Linux binary for the Windows EXE or bypass the pinned cloudflared checksum.
 - Run `python3 -m unittest discover -s tests -v` after relevant changes. Linux tests

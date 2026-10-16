@@ -52,8 +52,9 @@ class Client:
         })
         try:
             with self.opener.open(req, timeout=timeout) as response:
-                raw = response.read(8 * 1024 * 1024 + 1)
-                if len(raw) > 8 * 1024 * 1024:
+                limit = 8 * 1024 * 1024 + 8192  # Allow the relay job envelope.
+                raw = response.read(limit + 1)
+                if len(raw) > limit:
                     raise ClientError("Agent response is too large")
                 return json.loads(raw)
         except urllib.error.HTTPError as exc:
@@ -74,13 +75,19 @@ class Client:
 
     def action(self, action, args, request_id=None):
         request_id = request_id or str(uuid.uuid4())
-        timeout = min(340, args.get("timeout", 30) + 25) if action == "shell" else 60
+        requested = args.get("timeout", 30) if isinstance(args, dict) else 30
+        execution_timeout = requested if type(requested) is int and 1 <= requested <= 300 else 30
+        # The agent validates the original arguments. Invalid timeout input must
+        # produce a normal action error, not crash the worker before transmission.
+        timeout = execution_timeout + 25 if action == "shell" else 60
         return self.request("/v1/actions", {"id": request_id, "action": action, "args": args}, timeout)
 
 
 def parser_for_cli():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default=os.environ.get("REMOTE222_URL"))
+    parser.add_argument("--transport", choices=["direct", "relay"],
+                        default=os.environ.get("REMOTE222_TRANSPORT", "direct"))
     parser.add_argument("--token-file", type=Path)
     parser.add_argument("--request-id", help="Reuse this ID after an uncertain network result")
     sub = parser.add_subparsers(dest="action", required=True)
@@ -125,9 +132,13 @@ def main(argv=None):
         parser.error("Set REMOTE222_URL or pass --url")
     try:
         token = args.token_file.read_text(encoding="ascii").strip() if args.token_file else os.environ.get("REMOTE222_TOKEN", "")
-        client = Client(args.url, token)
+        if args.transport == "relay":
+            from .relay import RelayClient
+            client = RelayClient(args.url, token)
+        else:
+            client = Client(args.url, token)
         params = {key: value for key, value in vars(args).items()
-                  if key not in {"url", "token_file", "request_id", "action", "input", "output"} and value is not None}
+                  if key not in {"url", "transport", "token_file", "request_id", "action", "input", "output"} and value is not None}
         if args.action == "write":
             with args.input.open("rb") as stream:
                 content = stream.read(1024 * 1024 + 1)

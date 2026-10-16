@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import queue
+import secrets
 import subprocess
 import tempfile
 import threading
@@ -13,7 +15,7 @@ import threading
 from . import __version__
 from .agent import AgentServer, prepare_state
 from .client import Client
-from .session import bundled_tunnel, child_options, protect_state
+from .session import RelaySession, bundled_tunnel, child_options, protect_state
 
 
 def main():
@@ -65,6 +67,43 @@ def main():
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=5)
+        from .broker import BrokerServer
+        from .relay import RelayClient
+        with tempfile.TemporaryDirectory(prefix="remote222-relay-selftest-") as temp:
+            controller, worker = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+            broker = BrokerServer(0, Path(temp) / "broker", controller, worker)
+            broker_thread = threading.Thread(target=broker.serve_forever, daemon=True)
+            broker_thread.start()
+            events = queue.Queue()
+            url = f"http://127.0.0.1:{broker.server_port}"
+            session = RelaySession(Path(temp) / "agent", lambda kind, data: events.put((kind, data)), url, worker)
+            try:
+                session.start()
+                for _ in range(20):
+                    kind, data = events.get(timeout=10)
+                    if kind == "error":
+                        raise RuntimeError(data)
+                    if kind == "ready":
+                        break
+                else:
+                    raise RuntimeError("Relay session did not become ready")
+                client = RelayClient(url, controller)
+                assert client.info()["result"]["system"] == "Windows"
+                result = client.action("shell", {"command": "Write-Output 'frozen-queue-ok'"})
+                assert result["ok"] and "frozen-queue-ok" in result["result"]["stdout"]
+                report["checks"].append("frozen outbound queue, Windows feedback and PowerShell")
+                path = str(Path(temp) / "queue-roundtrip.txt")
+                assert client.action("write", {"path": path, "data_base64": "cXVldWU="})["ok"]
+                assert client.action("read", {"path": path})["result"]["data_base64"] == "cXVldWU="
+                report["checks"].append("file round trip through frozen outbound queue")
+            finally:
+                session.stop()
+                session.join(15)
+                broker.shutdown()
+                broker.server_close()
+                broker_thread.join(timeout=5)
+            assert not session.thread.is_alive()
+            report["checks"].append("queue session shutdown without a tunnel")
         report["ok"] = True
     except Exception as exc:
         report["error"] = f"{type(exc).__name__}: {exc}"
