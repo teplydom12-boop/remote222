@@ -3,6 +3,7 @@
 import hashlib
 import os
 from pathlib import Path
+import platform
 import subprocess
 import sys
 import urllib.request
@@ -36,7 +37,7 @@ def main():
     download(f"https://github.com/cloudflare/cloudflared/releases/download/{CLOUDFLARED_VERSION}/cloudflared-windows-amd64.exe",
              binary, CLOUDFLARED_SHA256)
     download(f"https://raw.githubusercontent.com/cloudflare/cloudflared/{CLOUDFLARED_VERSION}/LICENSE", vendor / "CLOUDFLARED-LICENSE.txt")
-    download("https://raw.githubusercontent.com/python/cpython/v3.12.12/LICENSE", vendor / "PYTHON-LICENSE.txt")
+    download(f"https://raw.githubusercontent.com/python/cpython/v{platform.python_version()}/LICENSE", vendor / "PYTHON-LICENSE.txt")
     subprocess.run([
         sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile", "--windowed",
         "--name", "Remote222", "--noupx", "--paths", str(ROOT),
