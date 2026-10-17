@@ -43,6 +43,85 @@ atomic_copy() {
         return 1
     fi
 }
+wait_for_account_https() {
+    # nginx reload signals its master; new workers/certificates become ready later.
+    # Retry read-only probes, retaining normal TLS verification on every attempt.
+    local deadline=$((SECONDS + ${1:-30})) temporary endpoint ready
+    temporary=$(mktemp -d) || return 1
+    while :; do
+        ready=1
+        for endpoint in healthz auth/v1/meta; do
+            if ! curl --fail --silent --show-error --connect-timeout 2 --max-time 3 \
+                --resolve "$PUBLIC_HOST:443:127.0.0.1" "https://$PUBLIC_HOST/$endpoint" \
+                --output "$temporary/body" 2> "$temporary/error"; then
+                ready=0
+                break
+            fi
+            if ! python3 - "$temporary/body" "$endpoint" <<'PY'
+import json, sys
+expected = {"ok": True, "service": "remote222-broker"} if sys.argv[2] == 'healthz' else {"ok": True, "configured": True}
+try:
+    with open(sys.argv[1], encoding='utf-8') as stream:
+        valid = json.load(stream) == expected
+except (OSError, ValueError):
+    valid = False
+sys.exit(0 if valid else 1)
+PY
+            then
+                printf 'HTTPS ответил, но /%s не подтвердил готовность сервера.\n' "$endpoint" > "$temporary/error"
+                ready=0
+                break
+            fi
+        done
+        if [[ $ready == 1 ]]; then
+            rm -rf "$temporary"
+            return 0
+        fi
+        if ((SECONDS >= deadline)); then
+            cat "$temporary/error" >&2
+            rm -rf "$temporary"
+            return 1
+        fi
+        sleep 1
+    done
+}
+configure_account_https() {
+    atomic_write "$SITE" 644 <<NGINX
+# Managed by $MARKER
+server {
+    listen 80 default_server;
+    server_name $PUBLIC_HOST;
+    access_log off;
+    location /.well-known/acme-challenge/ { root $WEBROOT; }
+    location / { return 301 https://$PUBLIC_HOST\$request_uri; }
+}
+server {
+    listen 443 ssl default_server;
+    server_name $PUBLIC_HOST;
+    ssl_certificate /etc/letsencrypt/live/remote222-account/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/remote222-account/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    client_max_body_size 12m;
+    access_log off;
+    location / {
+        proxy_pass http://127.0.0.1:8770;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header Connection "";
+        # Correct browser form navigation for the pinned v0.4.0 broker as well.
+        proxy_hide_header Referrer-Policy;
+        add_header Referrer-Policy same-origin always;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 30s;
+    }
+}
+NGINX
+    nginx -t
+    systemctl reload nginx
+    say 'Ожидаю применения HTTPS-конфигурации nginx…'
+    wait_for_account_https || die 'HTTPS не подтвердил готовность после перезагрузки nginx. Исправьте указанную ошибку и повторите запуск.'
+}
 die() {
     printf '\nОшибка: %s\n' "$*" >&2
     if [[ $SWITCHING == 1 ]]; then on_error; fi
@@ -75,7 +154,7 @@ done
 [[ $SOURCE_COMMIT =~ ^[0-9a-f]{40}$ ]] || die 'Этот черновик ещё не закреплён на проверенном исходном коммите. Не запускайте установку из черновика.'
 [[ -n ${PUBLIC_HOST:-} ]] || die 'Задайте PUBLIC_HOST — подтверждённое DNS-имя вашего сервера.'
 [[ $PREFLIGHT_ONLY == 0 || $ROLLBACK == 0 ]] || die '--preflight-only и --rollback нельзя объединять.'
-for command in python3 docker git curl nginx systemctl ss; do
+for command in python3 docker git curl nginx systemctl ss openssl; do
     command -v "$command" >/dev/null || die "Не найдена команда $command; требуется существующая установка Remote222."
 done
 [[ -f $CONFIG/installation && ! -L $CONFIG/installation ]] || die 'Нет маркера прежней установки.'
@@ -241,10 +320,7 @@ trap on_error ERR INT TERM
 if [[ -f $UPGRADE/completed ]]; then
     account_configured || die 'База аккаунта недоступна. Прежние ключи не включаются; восстановите приватную базу аккаунта перед запуском.'
     docker start "$CONTAINER" >/dev/null
-    curl --fail --silent --show-error --max-time 15 --resolve "$PUBLIC_HOST:443:127.0.0.1" "https://$PUBLIC_HOST/healthz" | \
-        python3 -c 'import json,sys; r=json.load(sys.stdin); sys.exit(r!={"ok": True, "service": "remote222-broker"})'
-    curl --fail --silent --show-error --max-time 15 --resolve "$PUBLIC_HOST:443:127.0.0.1" "https://$PUBLIC_HOST/auth/v1/meta" | \
-        python3 -c 'import json,sys; sys.exit(json.load(sys.stdin)!={"ok": True, "configured": True})'
+    configure_account_https
     say "Обновление уже завершено. Адрес: https://$PUBLIC_HOST. Повторный запуск не меняет пароль."
     exit 0
 fi
@@ -278,6 +354,10 @@ say 'Получаю сертификат DNS-имени через сущест�
 "$CERTBOT" certonly --non-interactive --agree-tos --register-unsafely-without-email \
     --webroot --webroot-path "$WEBROOT" --domain "$PUBLIC_HOST" --cert-name remote222-account \
     --deploy-hook "$CONFIG/reload-nginx"
+openssl verify -verify_hostname "$PUBLIC_HOST" \
+    -untrusted /etc/letsencrypt/live/remote222-account/chain.pem \
+    /etc/letsencrypt/live/remote222-account/cert.pem >/dev/null || \
+    die 'Полученный сертификат не прошёл проверку доверия или имени сервера. Переключение остановлено.'
 
 for kind in nginx service timer; do
     case "$kind" in nginx) path=$SITE ;; service) path=$SERVICE ;; timer) path=$TIMER ;; esac
@@ -334,40 +414,7 @@ done
 [[ $healthy == 1 ]] || die 'Новая версия не ответила на локальную проверку.'
 curl --fail --silent --show-error --max-time 5 http://127.0.0.1:8770/auth/v1/meta | \
     python3 -c 'import json,sys; sys.exit(json.load(sys.stdin)!={"ok": True, "configured": True})'
-atomic_write "$SITE" 644 <<NGINX
-# Managed by $MARKER
-server {
-    listen 80 default_server;
-    server_name $PUBLIC_HOST;
-    access_log off;
-    location /.well-known/acme-challenge/ { root $WEBROOT; }
-    location / { return 301 https://$PUBLIC_HOST\$request_uri; }
-}
-server {
-    listen 443 ssl default_server;
-    server_name $PUBLIC_HOST;
-    ssl_certificate /etc/letsencrypt/live/remote222-account/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/remote222-account/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    client_max_body_size 12m;
-    access_log off;
-    location / {
-        proxy_pass http://127.0.0.1:8770;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header Connection "";
-        proxy_buffering off;
-        proxy_request_buffering off;
-        proxy_read_timeout 30s;
-    }
-}
-NGINX
-nginx -t
-systemctl reload nginx
-curl --fail --silent --show-error --max-time 15 --resolve "$PUBLIC_HOST:443:127.0.0.1" "https://$PUBLIC_HOST/healthz" | \
-    python3 -c 'import json,sys; r=json.load(sys.stdin); sys.exit(r!={"ok": True, "service": "remote222-broker"})'
-curl --fail --silent --show-error --max-time 15 --resolve "$PUBLIC_HOST:443:127.0.0.1" "https://$PUBLIC_HOST/auth/v1/meta" | \
-    python3 -c 'import json,sys; sys.exit(json.load(sys.stdin)!={"ok": True, "configured": True})'
+configure_account_https
 atomic_write "$SERVICE" 644 <<UNIT
 # Managed by $MARKER
 [Unit]

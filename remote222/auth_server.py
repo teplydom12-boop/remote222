@@ -262,7 +262,9 @@ def _page(handler, title, content, *, cookie=None):
     handler.send_header("Content-Type", "text/html; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
     handler.send_header("Cache-Control", "no-store")
-    handler.send_header("Referrer-Policy", "no-referrer")
+    # HTML form navigations use Origin:null with no-referrer in Chromium.
+    # Keep the same-origin POST identifiable without sending cross-site referrers.
+    handler.send_header("Referrer-Policy", "same-origin")
     handler.send_header("X-Content-Type-Options", "nosniff")
     handler.send_header("X-Frame-Options", "DENY")
     handler.send_header("Content-Security-Policy", "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")

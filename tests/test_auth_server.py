@@ -189,13 +189,22 @@ class AuthHttpTests(unittest.TestCase):
         code, page, response_headers = self.request("/connect?code=" + device["user_code"])
         self.assertEqual(code, 200)
         self.assertIn("form-action 'self'", response_headers["Content-Security-Policy"])
+        # With no-referrer, a real HTML form sends Origin:null even on the same
+        # site. Preserve same-origin form navigation while rejecting foreign
+        # origins and retaining the CSRF challenge/cookie checks below.
+        self.assertEqual(response_headers["Referrer-Policy"], "same-origin")
         cookie = response_headers["Set-Cookie"]
         for attribute in ("Secure", "HttpOnly", "SameSite=Strict"):
             self.assertIn(attribute, cookie)
         csrf = re.search("name='csrf' value='([^']+)'", page).group(1)
         form = {"code": device["user_code"], "csrf": csrf, "username": "owner", "password": self.password, "decision": "approve"}
         headers = {"Origin": "https://broker.example", "Cookie": cookie.split(";")[0]}
-        self.assertEqual(self.request("/connect", form=form, headers={"Origin": "https://evil.example", "Cookie": headers["Cookie"]})[1]["error"], "invalid_origin")
+        for origin in ("https://evil.example", "null", ""):
+            with self.subTest(origin=origin):
+                rejected_headers = {"Cookie": headers["Cookie"]}
+                if origin:
+                    rejected_headers["Origin"] = origin
+                self.assertEqual(self.request("/connect", form=form, headers=rejected_headers)[1]["error"], "invalid_origin")
         self.assertEqual(self.request("/connect", form=form, headers={"Origin": headers["Origin"]})[1]["error"], "invalid_csrf")
         self.assertEqual(self.request("/connect", form=form, headers=headers)[0], 200)
         result = self.request("/auth/v1/device/poll", body={"device_code": device["device_code"]})[1]
