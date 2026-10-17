@@ -6,7 +6,7 @@ import zipfile
 
 root = Path(__file__).resolve().parents[1]
 files = [root / name for name in ("README.md", "pyproject.toml", "requirements-build.txt", "START.cmd", ".gitignore", "AGENTS.md", "Dockerfile", ".dockerignore")]
-for directory, extensions in (("remote222", {".py"}), ("scripts", {".ps1", ".py"}), ("tests", {".py"}),
+for directory, extensions in (("remote222", {".py"}), ("scripts", {".ps1", ".py", ".sh"}), ("tests", {".py"}),
                               ("packaging", {".md"}), ("docs", {".md"}), (".github/workflows", {".yml"})):
     files.extend(path for path in (root / directory).iterdir() if path.is_file() and path.suffix in extensions)
 destination = root / "dist" / "remote222-windows.zip"
