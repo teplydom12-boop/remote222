@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from remote222.auth_client import AuthClient, AuthConnectionError, SessionStore
 from remote222.broker import BrokerServer
-from remote222.client import ClientError, main, normalize_url
+from remote222.client import Client, ClientError, main, normalize_url
 from remote222.relay import RelayClient
 
 
@@ -101,6 +101,23 @@ class AccountClientTests(unittest.TestCase):
                 self.assertEqual(code, 0, err)
                 self.assertTrue(json.loads(out)["ok"])
                 self.assertFalse(json.loads(out)["online"])
+
+    def test_cli_relay_info_uses_explicit_request_id(self):
+        self.store.save(self.url, self.login())
+        request_id = "repeat-info-request-123"
+        code, out, err = self.cli(["--session-file", str(self.store.path),
+                                   "--request-id", request_id, "info"])
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(out), {"ok": False, "id": request_id, "error": "worker_offline"})
+        self.assertIn(f"Request ID: {request_id}", err)
+
+    def test_cli_direct_info_keeps_get_endpoint_with_request_id(self):
+        client = Client(self.url, "unused-fixture-credential")
+        with patch("remote222.client._operation_client", return_value=client), \
+                patch.object(client, "request", return_value={"ok": True, "result": {}}) as request:
+            code, _, err = self.cli(["--request-id", "direct-info-request-123", "info"])
+        self.assertEqual(code, 0, err)
+        request.assert_called_once_with("/v1/info")
 
     def test_device_connect_recovers_lost_success_and_does_not_print_credentials(self):
         original_start, original_poll = AuthClient.device_start, AuthClient.device_poll

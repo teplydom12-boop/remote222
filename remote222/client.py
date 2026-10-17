@@ -238,7 +238,10 @@ def main(argv=None):
             if len(content) > 1024 * 1024:
                 raise ClientError("File exceeds 1 MiB")
             params["data_base64"] = base64.b64encode(content).decode("ascii")
-        if args.action == "info":
+        from .relay import RelayClient
+        # Direct info remains a read-only GET. Explicit relay retries must use
+        # the supplied queue ID instead of creating a fresh info operation.
+        if args.action == "info" and not (args.request_id and isinstance(client, RelayClient)):
             result = client.info()
         else:
             request_id = args.request_id or str(uuid.uuid4())
