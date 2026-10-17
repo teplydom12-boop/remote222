@@ -1,4 +1,4 @@
-"""Linux/Windows controller; credentials are read from env or a local file."""
+"""Linux/Windows controller with browser-approved account sign-in."""
 
 import argparse
 import base64
@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,6 +23,8 @@ class NoRedirects(urllib.request.HTTPRedirectHandler):
 
 
 def normalize_url(url):
+    if not isinstance(url, str) or any(char.isspace() or ord(char) < 32 for char in url):
+        raise ClientError("Invalid agent URL")
     try:
         parsed = urllib.parse.urlsplit(url)
         port = parsed.port
@@ -32,7 +35,13 @@ def normalize_url(url):
     local = parsed.hostname in ("127.0.0.1", "localhost", "::1")
     if parsed.scheme != "https" and not (local and parsed.scheme == "http"):
         raise ClientError("HTTPS is required except for loopback tests")
-    return url.rstrip("/")
+    try:
+        hostname = parsed.hostname.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        raise ClientError("Invalid agent URL") from None
+    hostname = f"[{hostname}]" if ":" in hostname else hostname
+    suffix = f":{port}" if port is not None and port != (443 if parsed.scheme == "https" else 80) else ""
+    return f"{parsed.scheme}://{hostname}{suffix}"
 
 
 class Client:
@@ -85,12 +94,17 @@ class Client:
 
 def parser_for_cli():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", default=os.environ.get("REMOTE222_URL"))
-    parser.add_argument("--transport", choices=["direct", "relay"],
-                        default=os.environ.get("REMOTE222_TRANSPORT", "direct"))
+    parser.add_argument("--url", help="Server URL (defaults to saved session or REMOTE222_URL)")
+    parser.add_argument("--transport", choices=["direct", "relay"])
     parser.add_argument("--token-file", type=Path)
+    parser.add_argument("--session-file", type=Path, help="Private saved account session; ignores legacy environment credentials")
     parser.add_argument("--request-id", help="Reuse this ID after an uncertain network result")
     sub = parser.add_subparsers(dest="action", required=True)
+    connect = sub.add_parser("connect", help="Link this controller by approving a code in your browser")
+    connect.add_argument("--label", default="Codex", help="Name shown on the approval page")
+    sub.add_parser("session", help="Check the saved controller sign-in without operating the PC")
+    logout = sub.add_parser("logout", help="Revoke and remove the saved controller sign-in")
+    logout.add_argument("--local-only", action="store_true", help="Remove local profile without revoking the server session")
     sub.add_parser("info")
     opened = sub.add_parser("open")
     opened.add_argument("target")
@@ -125,20 +139,99 @@ def parser_for_cli():
     return parser
 
 
+def _account_command(args):
+    from .auth_client import AuthClient, AuthConnectionError, AuthHTTPError, SessionStore, default_session_path
+    store = SessionStore(args.session_file or default_session_path())
+    if args.token_file or args.transport == "direct":
+        raise ClientError("Account connections use relay mode; omit direct/token options")
+    if args.action == "connect":
+        url = args.url or os.environ.get("REMOTE222_URL")
+        if not url:
+            raise ClientError("Pass --url with your HTTPS server address")
+        auth = AuthClient(url)
+        started = time.monotonic()
+        pairing = auth.device_start(args.label)
+        deadline = started + pairing["expires_in"]
+        # The server supplies a relative path only. Never display an external
+        # verification URL, the polling secret, or the eventual session token.
+        print(f"Open: {auth.url}/connect", flush=True)
+        print(f"Code: {pairing['user_code']}", flush=True)
+        print("Sign in there and approve this controller. Waiting for approval...", flush=True)
+        retrying = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ClientError("Device sign-in expired; run connect again")
+            time.sleep(min(pairing["interval"], remaining))
+            if time.monotonic() >= deadline:
+                raise ClientError("Device sign-in expired; run connect again")
+            try:
+                result = auth.device_poll(pairing["device_code"], timeout=min(15, deadline - time.monotonic()))
+            except (AuthConnectionError, AuthHTTPError) as exc:
+                if isinstance(exc, AuthHTTPError) and exc.status not in {408, 429} and not 500 <= exc.status <= 599:
+                    raise
+                if not retrying:
+                    print("Waiting for the account server to reconnect; the same approval code is still in use.", flush=True)
+                    retrying = True
+                continue
+            if time.monotonic() >= deadline:
+                raise ClientError("Device sign-in expired; run connect again")
+            if result["status"] == "approved":
+                store.save(auth.url, result)
+                print("Controller connected. The session was saved privately; no cloud secret setting is needed.")
+                return 0
+    if args.action == "logout" and args.local_only:
+        store.delete()
+        print("Local session removed. The server session was not revoked.")
+        return 0
+    profile = store.load(expected_url=args.url, role="controller")
+    auth = AuthClient(profile["url"], profile["session_token"])
+    if args.action == "logout":
+        auth.logout()
+        store.delete()
+        print("Controller signed out; the saved session was revoked and removed.")
+    else:
+        result = auth.session()
+        if result["role"] != "controller":
+            raise ClientError("Saved account session has the wrong role")
+        print(json.dumps({"ok": True, "url": profile["url"], "role": result["role"],
+                          "expires_at": result["expires_at"]}, indent=2))
+    return 0
+
+
+def _operation_client(args):
+    from .auth_client import SessionStore, default_session_path
+    default_path = default_session_path()
+    use_profile = args.session_file is not None or (
+        args.token_file is None and args.transport != "direct" and default_path.exists())
+    if use_profile:
+        if args.token_file or args.transport == "direct":
+            raise ClientError("Saved account sessions use relay mode; omit direct/token options")
+        profile = SessionStore(args.session_file or default_path).load(expected_url=args.url, role="controller")
+        from .relay import RelayClient
+        return RelayClient(profile["url"], profile["session_token"])
+    url = args.url or os.environ.get("REMOTE222_URL")
+    if not url:
+        raise ClientError("Set REMOTE222_URL, pass --url, or connect an account session")
+    token = args.token_file.read_text(encoding="ascii").strip() if args.token_file else os.environ.get("REMOTE222_TOKEN", "")
+    transport = args.transport or os.environ.get("REMOTE222_TRANSPORT", "direct")
+    if transport not in {"direct", "relay"}:
+        raise ClientError("REMOTE222_TRANSPORT must be direct or relay")
+    if transport == "relay":
+        from .relay import RelayClient
+        return RelayClient(url, token)
+    return Client(url, token)
+
+
 def main(argv=None):
     parser = parser_for_cli()
     args = parser.parse_args(argv)
-    if not args.url:
-        parser.error("Set REMOTE222_URL or pass --url")
     try:
-        token = args.token_file.read_text(encoding="ascii").strip() if args.token_file else os.environ.get("REMOTE222_TOKEN", "")
-        if args.transport == "relay":
-            from .relay import RelayClient
-            client = RelayClient(args.url, token)
-        else:
-            client = Client(args.url, token)
+        if args.action in {"connect", "session", "logout"}:
+            return _account_command(args)
+        client = _operation_client(args)
         params = {key: value for key, value in vars(args).items()
-                  if key not in {"url", "transport", "token_file", "request_id", "action", "input", "output"} and value is not None}
+                  if key not in {"url", "transport", "token_file", "session_file", "request_id", "action", "input", "output"} and value is not None}
         if args.action == "write":
             with args.input.open("rb") as stream:
                 content = stream.read(1024 * 1024 + 1)
@@ -168,7 +261,13 @@ def main(argv=None):
     except (ClientError, OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("Cancelled.", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":
+    # Relay/account modules import this module by its package name. Reuse it
+    # when invoked with -m so ClientError retains one identity and stays terse.
+    sys.modules.setdefault("remote222.client", sys.modules[__name__])
     sys.exit(main())

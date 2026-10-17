@@ -2,6 +2,7 @@
 
 import argparse
 from contextlib import contextmanager
+import getpass
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -12,8 +13,10 @@ import secrets
 import sqlite3
 import time
 import uuid
+from urllib.parse import urlsplit
 
 from .agent import REQUEST_ID
+from .auth_server import AccountStore, AuthError, handle_auth
 
 MAX_COMMAND = 2 * 1024 * 1024
 MAX_RESULT = 8 * 1024 * 1024
@@ -283,17 +286,34 @@ class BrokerServer(ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
 
-    def __init__(self, port, state_dir, controller_token, worker_token, host="127.0.0.1"):
+    def __init__(self, port, state_dir, controller_token, worker_token, host="127.0.0.1", *, public_url=None, account_only=False):
         if (not isinstance(controller_token, str) or not isinstance(worker_token, str)
                 or not TOKEN.fullmatch(controller_token) or not TOKEN.fullmatch(worker_token)
                 or secrets.compare_digest(controller_token, worker_token)):
             raise ValueError("Two different 256-bit credentials are required")
         self.controller_token = controller_token
         self.worker_token = worker_token
+        self.account_only = account_only
+        if public_url is not None:
+            parsed = urlsplit(public_url)
+            origin_port = parsed.port
+            if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+                    or parsed.password is not None or parsed.path not in ("", "/") or parsed.query or parsed.fragment
+                    or any(c.isspace() or ord(c) < 32 for c in public_url)):
+                raise ValueError("Public URL must be an HTTPS origin without a path or credentials")
+            hostname = parsed.hostname.encode("idna").decode("ascii").lower()
+            hostname = f"[{hostname}]" if ":" in hostname else hostname
+            suffix = f":{origin_port}" if origin_port is not None and origin_port != 443 else ""
+            self.public_origin = f"https://{hostname}{suffix}"
+        else:
+            self.public_origin = None
         state_dir = Path(state_dir)
         state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         if os.name != "nt":
             state_dir.chmod(0o700)
+        self.accounts = AccountStore(state_dir / "auth.sqlite3")
+        if account_only and not self.accounts.configured():
+            raise ValueError("Account mode requires a configured local account")
         self.store = BrokerStore(state_dir / "broker.sqlite3")
         super().__init__((host, port), BrokerHandler)
 
@@ -339,8 +359,11 @@ class BrokerHandler(BaseHTTPRequestHandler):
 
     def authorize(self, role):
         values = self.headers.get_all("Authorization", [])
-        token = getattr(self.server, role + "_token")
-        if len(values) != 1 or not secrets.compare_digest(values[0].encode("utf-8"), ("Bearer " + token).encode("utf-8")):
+        if len(values) != 1 or not values[0].startswith("Bearer "):
+            raise BrokerError(401, "unauthorized")
+        if self.server.account_only or self.server.accounts.configured():
+            self.server.accounts.authorize(values[0][7:], role)
+        elif not secrets.compare_digest(values[0].encode("utf-8"), ("Bearer " + getattr(self.server, role + "_token")).encode("utf-8")):
             raise BrokerError(401, "unauthorized")
         if self.headers.get("Origin"):
             raise BrokerError(403, "browser_origin_not_allowed")
@@ -373,6 +396,8 @@ class BrokerHandler(BaseHTTPRequestHandler):
     def handle_request(self, method):
         try:
             path = self.path
+            if handle_auth(self, method):
+                return
             if method == "GET" and path == "/healthz":
                 result = {"ok": True, "service": "remote222-broker"}
             elif method == "GET" and (path == PREFIX + "status" or path.startswith(PREFIX + "jobs/")):
@@ -398,7 +423,7 @@ class BrokerHandler(BaseHTTPRequestHandler):
             else:
                 raise BrokerError(404, "not_found")
             self.reply(200, result)
-        except BrokerError as exc:
+        except (BrokerError, AuthError) as exc:
             self.reply(exc.status, {"ok": False, "error": exc.code})
         except (ValueError, UnicodeError, RecursionError):
             self.reply(400, {"ok": False, "error": "invalid_request"})
@@ -416,11 +441,33 @@ def main():
     parser.add_argument("--port", type=int, default=8770)
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--init-only", action="store_true")
+    parser.add_argument("--set-account", action="store_true", help="Set the local login/password and revoke previous sessions")
+    parser.add_argument("--public-url", help="Canonical HTTPS origin used by the browser approval page")
+    parser.add_argument("--account-only", action="store_true", help="Require account authentication; never enable legacy keys")
     args = parser.parse_args()
     if not 0 <= args.port <= 65535:
         parser.error("Invalid port")
-    controller_token = os.environ.get("REMOTE222_CONTROLLER_TOKEN")
-    worker_token = os.environ.get("REMOTE222_WORKER_TOKEN")
+    if args.set_account:
+        username = input("Логин Remote222: ").strip()
+        password = getpass.getpass("Пароль Remote222 (не отображается): ")
+        repeated = getpass.getpass("Повторите пароль: ")
+        if password != repeated:
+            parser.error("Passwords do not match")
+        try:
+            AccountStore(args.state_dir / "auth.sqlite3").set_account(username, password)
+        except ValueError as exc:
+            parser.error(str(exc))
+        print("Учётная запись сохранена. Прежние сеансы отозваны; старые ключи отключены в новом сервере.")
+        return
+    account_path = args.state_dir / "auth.sqlite3"
+    account_configured = account_path.exists() and AccountStore(account_path).configured()
+    if args.account_only and not account_configured:
+        parser.error("Account mode requires a configured local account; run --set-account in the private VPS console")
+    if account_configured:
+        controller_token, worker_token = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+    else:
+        controller_token = os.environ.get("REMOTE222_CONTROLLER_TOKEN")
+        worker_token = os.environ.get("REMOTE222_WORKER_TOKEN")
     if controller_token is not None or worker_token is not None:
         if (not controller_token or not worker_token or not TOKEN.fullmatch(controller_token)
                 or not TOKEN.fullmatch(worker_token) or secrets.compare_digest(controller_token, worker_token)):
@@ -431,7 +478,8 @@ def main():
             print(f"Credential file: {args.state_dir / name} (value not displayed)")
     if args.init_only:
         return
-    server = BrokerServer(args.port, args.state_dir, controller_token, worker_token, args.host)
+    server = BrokerServer(args.port, args.state_dir, controller_token, worker_token, args.host,
+                          public_url=args.public_url, account_only=args.account_only)
     print(f"Remote222 broker listening on {args.host}:{server.server_port}. Use a configured HTTPS reverse proxy.", flush=True)
     try:
         server.serve_forever()

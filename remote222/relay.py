@@ -268,7 +268,7 @@ class RelayWorker:
             if self._abort.is_set() and not self.stop_event.is_set():
                 raise ClientError(self.last_error or "Broker session stopped")
         except ClientError:
-            self.last_error = self.last_error or "Подключение отклонено; проверьте адрес, ключ работника и доступ к серверу."
+            self.last_error = self.last_error or "Подключение отклонено; проверьте адрес сервера и войдите в аккаунт снова."
             raise
         finally:
             self.connected.clear()

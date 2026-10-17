@@ -18,6 +18,16 @@ from .client import Client
 from .session import RelaySession, bundled_tunnel, child_options, protect_state
 
 
+def wait_ready(events):
+    for _ in range(20):
+        kind, data = events.get(timeout=10)
+        if kind == "error":
+            raise RuntimeError(data)
+        if kind == "ready":
+            return
+    raise RuntimeError("Relay session did not become ready")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
@@ -33,14 +43,17 @@ def main():
         report["checks"].append("bundled cloudflared checksum and executable")
         import tkinter as tk
         from .desktop_app import DesktopApp
-        root = tk.Tk()
-        try:
-            root.withdraw()
-            DesktopApp(root)
-            root.update()
-        finally:
-            root.destroy()
-        report["checks"].append("frozen Tk GUI initialization")
+        with tempfile.TemporaryDirectory(prefix="remote222-gui-selftest-") as temp:
+            root = tk.Tk()
+            try:
+                root.withdraw()
+                app = DesktopApp(root, state_dir=Path(temp) / "gui")
+                assert hasattr(app, "username_entry") and hasattr(app, "password_entry")
+                assert not hasattr(app, "worker_key")
+                root.update()
+            finally:
+                root.destroy()
+        report["checks"].append("frozen Tk account login GUI initialization")
         from .windows import INPUT, user32
         assert ctypes.sizeof(INPUT) == (40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28)
         assert user32().GetSystemMetrics(0) > 0
@@ -79,14 +92,7 @@ def main():
             session = RelaySession(Path(temp) / "agent", lambda kind, data: events.put((kind, data)), url, worker)
             try:
                 session.start()
-                for _ in range(20):
-                    kind, data = events.get(timeout=10)
-                    if kind == "error":
-                        raise RuntimeError(data)
-                    if kind == "ready":
-                        break
-                else:
-                    raise RuntimeError("Relay session did not become ready")
+                wait_ready(events)
                 client = RelayClient(url, controller)
                 assert client.info()["result"]["system"] == "Windows"
                 result = client.action("shell", {"command": "Write-Output 'frozen-queue-ok'"})
@@ -104,6 +110,77 @@ def main():
                 broker_thread.join(timeout=5)
             assert not session.thread.is_alive()
             report["checks"].append("queue session shutdown without a tunnel")
+        from .auth_client import AuthClient, SessionStore
+        from .client import ClientError, main as controller_main
+        from .session import relay_session_store
+        from contextlib import redirect_stdout
+        import io
+        with tempfile.TemporaryDirectory(prefix="remote222-account-selftest-") as temp:
+            folder = Path(temp)
+            broker = BrokerServer(0, folder / "broker", secrets.token_urlsafe(32), secrets.token_urlsafe(32))
+            username, password = "frozen-owner", secrets.token_urlsafe(24)
+            broker.accounts.set_account(username, password)
+            broker_thread = threading.Thread(target=broker.serve_forever, daemon=True)
+            broker_thread.start()
+            url = f"http://127.0.0.1:{broker.server_port}"
+            events = queue.Queue()
+            state = folder / "agent"
+            session = RelaySession(state, lambda kind, data: events.put((kind, data)),
+                                   url, username=username, password=password)
+            try:
+                # The real HTTP pairing API is exercised inside the frozen EXE.
+                auth = AuthClient(url)
+                pairing = auth.device_start("Frozen executable check")
+                assert auth.device_poll(pairing["device_code"])["status"] == "pending"
+                broker.accounts.approve_device(pairing["user_code"], username, password,
+                                               broker.accounts.browser_challenge())
+                approved = auth.device_poll(pairing["device_code"])
+                assert auth.device_poll(pairing["device_code"])["session_token"] == approved["session_token"]
+                store = SessionStore(folder / "controller" / "session.json")
+                controller = store.save(url, approved)
+                report["checks"].append("frozen controller pairing and private saved session")
+                session.start()
+                wait_ready(events)
+                worker = relay_session_store(state).load(expected_url=url, role="worker")
+                assert session.password == ""
+                assert password not in relay_session_store(state).path.read_text(encoding="utf-8")
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    assert controller_main(["--session-file", str(store.path), "info"]) == 0
+                assert json.loads(output.getvalue())["result"]["system"] == "Windows"
+                client = RelayClient(url, controller["session_token"])
+                result = client.action("shell", {"command": "Write-Output 'frozen-account-ok'"})
+                assert result["ok"] and "frozen-account-ok" in result["result"]["stdout"]
+                report["checks"].append("frozen account login and queued Windows command feedback")
+                session.stop()
+                session.join(15)
+                assert not session.thread.is_alive()
+                assert relay_session_store(state).load(expected_url=url, role="worker")["session_token"] == worker["session_token"]
+                events = queue.Queue()
+                session = RelaySession(state, lambda kind, data: events.put((kind, data)), url, username=username)
+                session.start()
+                wait_ready(events)
+                assert client.info()["result"]["system"] == "Windows"
+                report["checks"].append("frozen restart with remembered Windows account")
+                session.logout()
+                session.join(15)
+                assert not session.thread.is_alive()
+                assert not relay_session_store(state).path.exists()
+                try:
+                    AuthClient(url, worker["session_token"]).session()
+                except ClientError as exc:
+                    assert "unauthorized" in str(exc)
+                else:
+                    raise AssertionError("Windows logout did not revoke its session")
+                AuthClient(url, controller["session_token"]).logout()
+                store.delete()
+                report["checks"].append("frozen account logout and server revocation")
+            finally:
+                session.stop()
+                session.join(15)
+                broker.shutdown()
+                broker.server_close()
+                broker_thread.join(timeout=5)
         report["ok"] = True
     except Exception as exc:
         report["error"] = f"{type(exc).__name__}: {exc}"

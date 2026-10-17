@@ -8,6 +8,7 @@ dist/*
 !dist/remote222-windows.zip.sha256
 .pytest_cache/
 .remote222/
+.remote222-controller/
 *.token
 *.sqlite3*
 .env

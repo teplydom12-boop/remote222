@@ -171,15 +171,16 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("1 MiB", result["message"])
 
     def test_cli_nonzero_status_and_file_download(self):
-        env = {**os.environ, "REMOTE222_URL": self.url, "REMOTE222_TOKEN": self.token}
-        result = subprocess.run([sys.executable, "-m", "remote222.client", "shell", "exit 9"],
+        env = {**os.environ, "REMOTE222_URL": self.url, "REMOTE222_TOKEN": self.token,
+               "REMOTE222_TRANSPORT": "direct"}
+        result = subprocess.run([sys.executable, "-m", "remote222.client", "--transport", "direct", "shell", "exit 9"],
                                 env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 1)
         self.assertEqual(json.loads(result.stdout)["result"]["exit_code"], 9)
         source = Path(self.temp.name) / "source.txt"
         target = Path(self.temp.name) / "target.txt"
         source.write_bytes(b"download test")
-        result = subprocess.run([sys.executable, "-m", "remote222.client", "read", str(source),
+        result = subprocess.run([sys.executable, "-m", "remote222.client", "--transport", "direct", "read", str(source),
                                  "--output", str(target)], env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(target.read_bytes(), b"download test")
