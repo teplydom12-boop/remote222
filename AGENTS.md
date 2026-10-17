@@ -24,9 +24,11 @@
   secret binding is needed for account mode. A replaced workspace or expired or
   revoked session requires a new browser approval. Check `session` for sign-in
   status; this does not check the Windows computer.
-- Before a live remote operation run
+- At the start of a remote-control turn, or after reconnecting, run
   `python3 -m remote222.client --session-file /workspace/.remote222-controller/session.json info`
-  and verify the expected Windows machine. A broker heartbeat is insufficient.
+  and verify the expected Windows machine. Prepared browser commands also verify
+  the approved machine within their operation; do not add redundant info and
+  status round trips before each such command. A broker heartbeat is insufficient.
   Do not start a Linux agent as a substitute for the user's Windows computer.
 - The account hostname resolves to VPS `95.163.231.24`; DNS alone does not prove
   that HTTPS, the account upgrade, or Windows connectivity works. Follow
@@ -38,8 +40,19 @@
   results, reuse the printed request ID with the same action and arguments.
   Never blindly issue a new ID for an action that may have completed. For
   `outcome_unknown`, inspect state before repeating an operation.
-- Desktop text and keys target the foreground window. Check a screenshot before
-  input; account for image scaling and virtual desktop offsets when clicking.
+- The user requires code-based operation and observation: prefer system APIs,
+  PowerShell, browser CDP/DOM and accessibility APIs. Do not take screenshots or
+  use coordinate clicks unless the user explicitly requests that approach.
+  Use the verified installed Google Chrome executable, rather than assuming the
+  default-browser registration is Chrome. Reuse its dedicated automation profile
+  and target; do not restart or modify the user's ordinary browser profile.
+- Use the prepared `python3 -m remote222.browser` commands documented in
+  `docs/browser-control.md` for routine browser work. Keep its private state at
+  `/workspace/.remote222-controller/browser-state.json`. Install the helper once,
+  reuse the approved Chrome profile, and combine navigation, readiness and export
+  with `save --url ...` when appropriate. Do not construct a new CDP implementation
+  or launch a new browser for each request. Ordinary shell/file/program operations
+  remain available through `remote222.client`.
 - The old direct Cloudflare mode remains available. Only for that mode use
   injected `REMOTE222_URL` and `REMOTE222_TOKEN`, and pass `--transport direct`.
   Inspect secret presence only; never print credentials or copy them into chat,
